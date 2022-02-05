@@ -35,13 +35,14 @@ fail() {
 
 }
 
-
-OPENVPN="/usr/local/sbin/openvpn"
+OPENVPN="/opt/homebrew/sbin/openvpn"
 
 if [ ! -x $OPENVPN ]
 then
 	echo "No openvpn binary available"
 fi
+
+echo -ne "\033]0;Tunnelbug\007"
 
 ACTION="$1"
 CONFIG="$2"
@@ -92,17 +93,48 @@ then
 fi
 
 
-AUTHFILE=`mktemp`
+PRIVFILE=`mktemp`.fifo
 
-security find-generic-password -s "Tunnelblick-Auth-${CONFIG}" -g -w -a username >> $AUTHFILE || fail "Failed to find username from keychain"
-security find-generic-password -s "Tunnelblick-Auth-${CONFIG}" -g -w -a password >> $AUTHFILE || fail "Failed to find password from keychain"
+mkfifo -m 600 "$PRIVFILE"
+
+OPTS=""
+
+if grep auth-user-pass "$CONFIG_FILE"
+then
+
+	AUTHPASS="$(security find-generic-password -s "Tunnelblick-Auth-${CONFIG}" -g -w -a username)" ||  fail "Failed to find username from keychain"
+	AUTHPASS="${AUTHPASS}\n$(security find-generic-password -s "Tunnelblick-Auth-${CONFIG}" -g -w -a password)" || fail "Failed to find password from keychain"
+	PRIVPASS="$(security find-generic-password -s "Tunnelblick-Auth-${CONFIG}" -g -w -a privateKey)"
+
+	if [ ! -z "${PRIVPASS}" ]
+	then
+		#OPTS='--askpass <(echo "${PRIVPASS}")'
+		( while true; do echo "$PRIVPASS" > "$PRIVFILE" && sleep 1; done ) &
+		OPTS='--askpass "$PRIVFILE"'
+	fi
+	export AUTHPASS
+	export PRIVPASS
+else
+	export AUTHPASS=""
+	export PRIVPASS=""
+fi
+
+export OPTS
+export PRIVFILE
+export CONFIG_FILE
 
 cd "$CONFIG_DIR"
 
+echo -ne "\033]0;Tunnelbug ${CONFIG}\007"
+
 echo "Sudo password"
-sudo ${OPENVPN} --config "${CONFIG_FILE}" --writepid "$PIDFILE" --auth-user-pass "$AUTHFILE" --script-security 2 &
+if [ ! -z "$AUTHPASS" ]
+then
+   sudo -E bash -c "exec ${OPENVPN} --auth-retry interact --verb 5 --script-security 2 --config \"\${CONFIG_FILE}\" --auth-user-pass <(echo -e \"\${AUTHPASS}\") ${OPTS}"
+else
+   sudo -E bash -c "exec ${OPENVPN} --auth-retry interact --verb 5 --script-security 2 --config \"\${CONFIG_FILE}\" ${OPTS}"
+fi
 
-sleep 7
-rm $AUTHFILE
+rm $PRIVFILE
 
-wait
+echo -e "\n\n"
